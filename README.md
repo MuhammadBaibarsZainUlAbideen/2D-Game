@@ -26,6 +26,7 @@ The first configure downloads raylib 5.5 from GitHub, so internet access is requ
 - Enter: restart after death
 - Weapons switch automatically to a different random weapon every 7-11 seconds, with fresh ammunition. The HUD shows the current weapon and countdown.
 - E near a wall or the foot of a shaft: deploy your reusable pocket ladder, automatically climb, and retrieve it at the top. E also uses existing ladders. Firing is disabled while climbing.
+- F: toggle knife / return to your gun. Left-click swings a short 95-unit arc toward the cursor, instantly killing and dismembering every living zombie in that arc, including brutes. Walls block melee hits. Swings have a 0.45-second cooldown and use no ammo. Automatic weapon switching pauses while the knife is equipped.
 - Escape: quit
 
 ## Notes
@@ -34,7 +35,7 @@ Zombies approach from both sides, chase the soldier, and attack at close range. 
 
 Infected sprint and leap toward the player, dodge aimed gunfire with cooldown-limited jumps, and drop from above as well as entering from either side. Bullet impacts can detach heads, arms, and legs; detached parts tumble and bounce, wounds spray blood, and droplets leave temporary ground pools. Leg injuries slow enemies. Particle, body-part, and pool counts are capped for performance.
 
-The arsenal includes an assault rifle, pistol, Uzi, bow, RPG, grenade launcher, and machine gun. Each has its own capacity, damage, fire interval, reload duration, and appearance. Arrows have travel time and gravity; rockets fly straight and grenades arc, with both explosives damaging nearby infected. Jumping lifts both boots with the soldier and tucks his knees instead of stretching his legs to the road.
+The arsenal includes an assault rifle, pistol, Uzi, bow, RPG, grenade launcher, and machine gun. Each has its own capacity, damage, fire interval, reload duration, and appearance. Arrows have travel time and gravity; rockets fly straight and grenades arc, with both explosives damaging nearby infected. The bow and crossbow stay aimed at the cursor during nocking, without automatic reload tilt or idle weapon bob. Jumping lifts both boots with the soldier and tucks his knees instead of stretching his legs to the road. Falling and landing do not damage the soldier; mines and zombie attacks still do.
 
 The random arsenal also includes an eight-pellet shotgun, powerful sniper rifle, faster crossbow bolts, a freeze blaster that slows infected for 2.5 seconds, and an explosive confetti cannon. Starting weapons and every subsequent switch are random, with immediate repeats excluded.
 
@@ -42,10 +43,13 @@ Five infected types mix speeds and behavior: slow shamblers, fast track stars, h
 
 ## Underground network
 
-Walk right from spawn to the marked TUNNEL ACCESS opening (world x=700-840). Drop through it to explore. The world generates additional horizontal sectors and deeper floors around your position instead of ending at the old map boundary. Alternating shafts connect corridors; raised partitions, drops and fall damage create hazards. Walls, floors and ceilings have collision and block gunfire/projectiles. The camera follows underground and mouse aiming accounts for depth.
+Walk right from spawn to the marked TUNNEL ACCESS opening. Drop through it to explore. Every launch and restart creates a new random layout seed: shaft positions and widths, partitions, ledges, mines, fixed ladders and torch placements vary. Explored sectors keep their layout for the duration of that run. The world generates additional horizontal sectors and deeper floors around your position instead of ending at the old map boundary. Alternating shafts connect corridors; raised partitions and drops create obstacles. Walls, floors and ceilings have collision and block gunfire/projectiles. The camera follows underground and mouse aiming accounts for depth.
 
 Torches flicker on masonry walls beside rusty pipes and supports. Pressure mines flash red and detonate when either you or a living zombie steps on them. Their blast damages nearby zombies and the soldier, and spent mines remain spent when returning to a sector.
 
 Some shafts have permanent ladders. Your personal ladder returns to your pocket after an automatic climb. The sixth infected type, LADDER CREW, visibly carries a ladder and can deploy it once at a blocked wall or shaft. That ladder stays in the world for other zombies to use; ordinary zombies cannot climb bare walls. Zombies approach usable ladders when pursuing a target above them.
 
+If six or more living zombies cluster on a floor above you for 2.5 seconds, a DRILLER joins them. It takes three seconds of visible jackhammer work to open a 160-unit hole through their floor. Zombies above you steer toward drilled openings and drop through them. The actual floor collision is removed, and the breach persists when revisiting that area. Drillers can be killed or frozen before completing their work; a 12-second reinforcement cooldown prevents continuous spawns. Drilled-away mines are removed with their supporting floor.
+
 Run physics checks with `ctest --test-dir build --output-on-failure -C Release` after building. Checks cover surface support, entrance drops, underground landing, ladder placement and safe exits, wall/ceiling collision, spent-mine persistence, and distant/deep terrain generation.
+

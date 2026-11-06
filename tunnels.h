@@ -5,28 +5,70 @@
 constexpr float SECTOR=1400, LEVEL=260;
 struct Ladder { float x,top,bottom,exitX; bool personal=false; };
 struct Mine { Vector2 p; std::uint64_t id; };
+struct DrillHole { float x,y,width; };
 struct TunnelWorld {
+    std::uint32_t seed=1;
+    explicit TunnelWorld(std::uint32_t layoutSeed=1):seed(layoutSeed){}
     std::vector<Rectangle> solids;
     std::vector<Ladder> ladders;
     std::vector<Mine> mines;
+    std::vector<DrillHole> holes;
     std::unordered_set<std::uint64_t> spent;
     int firstSector=0,lastSector=0,firstLevel=0,lastLevel=0;
-    float gap(int sector,int level) const { return sector*SECTOR+(level==0?700:((sector+level)%2?300:1000)); }
+    std::uint32_t sample(int sector,int level,std::uint32_t feature) const {
+        std::uint32_t h=seed^std::uint32_t(sector)*0x9e3779b9u^std::uint32_t(level)*0x85ebca6bu^feature*0xc2b2ae35u;
+        h^=h>>16;h*=0x7feb352du;h^=h>>15;h*=0x846ca68bu;return h^(h>>16);
+    }
+    float gap(int sector,int level) const {
+        float base=level==0?660.0f:(level%2?200.0f:1000.0f);
+        return sector*SECTOR+base+sample(sector,level,1)%(level==0?260:170);
+    }
+    float gapWidth(int sector,int level) const {return 115.0f+sample(sector,level,2)%76;}
+    bool fixedLadder(int sector,int level) const {return sample(sector,level,3)%3==0;}
+    void drill(float x,float y){
+        for(auto h:holes)if(fabsf(h.x-x)<50&&fabsf(h.y-y)<40)return;
+        holes.push_back({x,y,160});
+    }
     void generate(Vector2 player){
         solids.clear();mines.clear();
         firstSector=std::max(0,int(player.x/SECTOR)-2);lastSector=int(player.x/SECTOR)+2;
         int depth=std::max(0,int((player.y-GROUND)/LEVEL));
         firstLevel=std::max(0,depth-3);lastLevel=depth+4;
         for(int c=firstSector;c<=lastSector;c++)for(int l=firstLevel;l<=lastLevel;l++){
-            float y=GROUND+l*LEVEL,x=c*SECTOR,g=gap(c,l);
-            solids.push_back({x,y,g-x,28});solids.push_back({g+140,y,x+SECTOR-g-140,28});
+            float y=GROUND+l*LEVEL,x=c*SECTOR,g=gap(c,l),width=gapWidth(c,l);
+            solids.push_back({x,y,g-x,28});solids.push_back({g+width,y,x+SECTOR-g-width,28});
             if(l>0){
                 // Tall broken partitions create raised passages that require ladders.
-                float wall=x+610;solids.push_back({wall,y-145,42,145});
+                float wall=x+580+sample(c,l,4)%260;
+                // Keep the arrival shaft clear so falling players land on the floor.
+                float above=gap(c,l-1),aboveWidth=gapWidth(c,l-1);
+                if(wall+65>above-25&&wall<above+aboveWidth+25)wall=x+100;
+                float height=115+sample(c,l,5)%41;
+                solids.push_back({wall,y-height,40.0f+sample(c,l,6)%26,height});
+                if(sample(c,l,7)%2==0){
+                    float ledge=x+450;
+                    if(ledge>g+width+25||ledge+75<g-25)solids.push_back({ledge,y-65,75,65});
+                }
                 std::uint64_t id=(std::uint64_t(c)<<32)|std::uint32_t(l);
-                if(!spent.count(id))mines.push_back({{x+480+(c%2)*350,y-3},id});
+                float mineX=x+420+sample(c,l,8)%550;
+                if((mineX>g-25&&mineX<g+width+25)||(mineX>wall-25&&mineX<wall+90))mineX=x+1320;
+                if(sample(c,l,9)%5!=0&&!spent.count(id))mines.push_back({{mineX,y-3},id});
             }
         }
+        // Split actual collision geometry; drilled openings survive streaming out and back.
+        for(auto hole:holes){
+            std::vector<Rectangle> cut;
+            for(auto r:solids){
+                float left=hole.x-hole.width/2,right=hole.x+hole.width/2;
+                if(r.y+r.height<hole.y||r.y>hole.y+30||r.x>=right||r.x+r.width<=left){cut.push_back(r);continue;}
+                if(r.x<left)cut.push_back({r.x,r.y,left-r.x,r.height});
+                if(r.x+r.width>right)cut.push_back({right,r.y,r.x+r.width-right,r.height});
+            }
+            solids.swap(cut);
+        }
+        mines.erase(std::remove_if(mines.begin(),mines.end(),[&](const Mine&m){
+            for(auto h:holes)if(fabsf(m.p.x-h.x)<h.width/2&&fabsf(m.p.y-h.y)<35)return true;return false;
+        }),mines.end());
     }
     // Swept axis collision keeps feet on slabs and stops bodies crossing ceilings/walls.
     bool move(Vector2 &p,Vector2 &v,float dt,float height=96){
@@ -67,7 +109,7 @@ struct TunnelWorld {
             }
             line({x,y+27},{x+SECTOR,y+27},7,{61,48,36,255});
             for(int a=0;a<4;a++){
-                float ax=x+a*370+55;
+                float ax=x+a*340+35+sample(c,l,20+a)%65;
                 rect(ax,y,14,LEVEL-28,{53,50,42,255});rect(ax+14,y,7,LEVEL-28,{12,15,15,130});
                 float ty=y+96,tx=ax+85;
                 line({tx-5,ty+25},{tx,ty},6,{99,65,37,255});rect(tx-9,ty+8,18,6,{38,35,30,255});
@@ -81,15 +123,23 @@ struct TunnelWorld {
         for(auto r:solids){r.x-=cameraX;DrawRectangleRec(r,{68,63,51,255});rect(r.x,r.y,r.width,5,{113,101,76,255});
             for(float x=r.x+15;x<r.x+r.width;x+=63)line({x,r.y+8},{x+22,r.y+20},1,{38,39,34,255});}
         for(int c=firstSector;c<=lastSector;c++)for(int l=firstLevel;l<=lastLevel;l++){
-            float g=gap(c,l)-cameraX,y=GROUND+l*LEVEL;
-            rect(g,y,140,28,{13,16,17,255});
-            line({g,y},{g,y+28},4,{104,91,66,255});line({g+140,y},{g+140,y+28},4,{104,91,66,255});
+            float g=gap(c,l)-cameraX,y=GROUND+l*LEVEL,w=gapWidth(c,l);
+            rect(g,y,w,28,{13,16,17,255});
+            line({g,y},{g,y+28},4,{104,91,66,255});line({g+w,y},{g+w,y+28},4,{104,91,66,255});
             if(l>0){DrawText("DROP",(int)g+48,(int)y-15,10,{181,122,59,200});}
         }
         for(int c=firstSector;c<=lastSector;c++){
             float g=gap(c,0)-cameraX;
-            rect(g-12,GROUND-42,9,42,{161,133,54,255});rect(g+143,GROUND-42,9,42,{161,133,54,255});
+            rect(g-12,GROUND-42,9,42,{161,133,54,255});rect(g+gapWidth(c,0)+3,GROUND-42,9,42,{161,133,54,255});
             DrawText("TUNNEL ACCESS",(int)g-4,(int)GROUND-63,13,{233,195,100,255});
+        }
+        for(auto h:holes){
+            float x=h.x-cameraX;
+            rect(x-h.width/2,h.y,h.width,28,{9,12,13,255});
+            for(int i=0;i<5;i++){
+                float edge=x-h.width/2;
+                DrawTriangle({edge-5,h.y+i*6},{edge+8,h.y+i*6+3},{edge-5,h.y+i*6+8},{103,88,62,255});
+            }
         }
         for(auto m:mines){Vector2 p={m.p.x-cameraX,m.p.y};DrawEllipse((int)p.x,(int)p.y,12,4,{78,88,47,255});DrawCircleV({p.x,p.y-3},2,sinf(time*6)>0?RED:MAROON);}
     }

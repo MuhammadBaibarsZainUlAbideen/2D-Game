@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <chrono>
 
 // Self-contained, procedural side-scrolling shooter. No external art files.
 constexpr int SW = 1280, SH = 720;
@@ -19,15 +20,16 @@ Vector2 dir(float a){return {cosf(a),sinf(a)};}
 void line(Vector2 a,Vector2 b,float w,Color c){DrawLineEx(a,b,w,c);}
 void rect(float x,float y,float w,float h,Color c){DrawRectangleRec({x,y,w,h},c);}
 #include "tunnels.h"
+#include "melee.h"
 
 struct Particle { Vector2 p,v; float life,maxLife,size; Color color; int kind; };
 struct Tracer { Vector2 a,b; float life; };
 struct Soldier { Vector2 p{420,GROUND}; Vector2 vel{0,0}; bool grounded=true; float walk=0, recoil=0, fireCooldown=0; int facing=1; };
-struct Zombie { Vector2 p; float health=100, phase=0, attack=0, fall=0; float vy=0, dodge=1, speed=150, bleed=0; unsigned missing=0; int kind=0, deathStyle=0; float vx=0, spin=0, frozen=0, stumble=0; bool ladderUsed=false,grounded=false; int climbing=-1; };
+struct Zombie { Vector2 p; float health=100, phase=0, attack=0, fall=0; float vy=0, dodge=1, speed=150, bleed=0; unsigned missing=0; int kind=0, deathStyle=0; float vx=0, spin=0, frozen=0, stumble=0; bool ladderUsed=false,grounded=false; int climbing=-1; float drillTime=0,drillY=0; };
 struct Quip { Vector2 p; float life; int text; };
 constexpr const char* quips[]={"I MEANT TO DO THAT!","MY KNEES!","UNPAID SICK LEAVE","WHEEEEE!","10/10 LANDING","BRB. DEAD.","WHO PUT THAT THERE?"};
-constexpr const char* zombieNames[]={"SHAMBLER","TRACK STAR","POGO CLOWN","BIG CHUNGUS","OFFICE INTERN","LADDER CREW"};
-constexpr Color zombieColors[]={{73,83,58,255},{139,53,49,255},{135,69,146,255},{78,105,128,255},{89,89,99,255},{161,113,46,255}};
+constexpr const char* zombieNames[]={"SHAMBLER","TRACK STAR","POGO CLOWN","BIG CHUNGUS","OFFICE INTERN","LADDER CREW","DRILLER"};
+constexpr Color zombieColors[]={{73,83,58,255},{139,53,49,255},{135,69,146,255},{78,105,128,255},{89,89,99,255},{161,113,46,255},{214,146,45,255}};
 struct Gib { Vector2 p,v; float angle,spin,life; int part; };
 struct BloodPool { Vector2 p; float size,life; };
 enum WeaponType { RIFLE, PISTOL, UZI, BOW, RPG, GRENADE, MACHINE_GUN, SHOTGUN, SNIPER, CROSSBOW, FREEZE, CONFETTI, WEAPON_COUNT };
@@ -45,6 +47,9 @@ int randomWeapon(int current=-1){
     int choice=GetRandomValue(0,WEAPON_COUNT-(current>=0?2:1));
     return current>=0&&choice>=current?choice+1:choice;
 }
+std::uint32_t newLayoutSeed(){
+    return (std::uint32_t)std::chrono::high_resolution_clock::now().time_since_epoch().count()^std::uint32_t(GetRandomValue(1,2147483646));
+}
 
 int main(){
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
@@ -53,9 +58,10 @@ int main(){
     RenderTexture2D scene=LoadRenderTexture(SW,SH);
     SetTextureFilter(scene.texture,TEXTURE_FILTER_BILINEAR);
     Soldier s;
-    TunnelWorld tunnels;
+    TunnelWorld tunnels(newLayoutSeed());
     Ladder personalLadder{};bool climbing=false;
     float cameraY=0,ladderNotice=0;
+    float crowdTime=0,drillerCooldown=0,drillerNotice=0;Vector2 crowdSpot{};
     // Fixed ladders are deterministic; carrier ladders remain where deployed.
     std::unordered_set<std::uint64_t> generatedLadders;
     std::vector<Particle> particles;
@@ -68,6 +74,8 @@ int main(){
     std::vector<Projectile> projectiles;
     std::vector<Quip> jokes;
     int weapon=randomWeapon();
+    bool knifeEquipped=false;
+    float knifeSwing=0,knifeCooldown=0;
     float switchTimer=rf(7,11), switchNotice=0;
     int ammo=weapons[weapon].capacity, kills=0;
     float health=100, reload=0, spawnTimer=0.8f, hurt=0;
@@ -166,22 +174,43 @@ int main(){
         float dt=std::min(GetFrameTime(),0.033f); time+=dt;
         if(health<=0 && IsKeyPressed(KEY_ENTER)){
             s=Soldier{}; zombies.clear(); particles.clear(); tracers.clear(); gibs.clear(); pools.clear();
-            projectiles.clear();jokes.clear();tunnels=TunnelWorld{};generatedLadders.clear();climbing=false;cameraY=0;weapon=randomWeapon();switchTimer=rf(7,11);switchNotice=0;reloadDuration=weapons[weapon].reload;
+            projectiles.clear();jokes.clear();tunnels=TunnelWorld(newLayoutSeed());generatedLadders.clear();climbing=false;cameraY=0;weapon=randomWeapon();switchTimer=rf(7,11);switchNotice=0;reloadDuration=weapons[weapon].reload;
             health=100; ammo=weapons[weapon].capacity; kills=0; rounds=0; reload=0; spawnTimer=.8f;
+            knifeEquipped=false;knifeSwing=0;knifeCooldown=0;
+            crowdTime=0;drillerCooldown=0;drillerNotice=0;
         }
         hurt=std::max(0.0f,hurt-dt*2);
         ladderNotice=std::max(0.0f,ladderNotice-dt);
+        knifeSwing=std::max(0.0f,knifeSwing-dt);knifeCooldown=std::max(0.0f,knifeCooldown-dt);
+        if(IsKeyPressed(KEY_F)&&health>0&&!climbing){knifeEquipped=!knifeEquipped;reload=0;flash=0;knifeSwing=0;}
         tunnels.generate(s.p);
+        drillerCooldown=std::max(0.0f,drillerCooldown-dt);drillerNotice=std::max(0.0f,drillerNotice-dt);
+        if(health>0){
+            int largest=0;Vector2 spot{};bool activeDriller=false;
+            for(const auto &z:zombies)if(z.health>0&&z.kind==6&&z.drillTime>0)activeDriller=true;
+            for(const auto &anchor:zombies)if(anchor.health>0&&anchor.grounded&&s.p.y-anchor.p.y>150&&fabsf(s.p.x-anchor.p.x)<650&&tunnels.solidPoint({anchor.p.x,anchor.p.y+5})){
+                int count=0;for(const auto &other:zombies)if(other.health>0&&fabsf(other.p.x-anchor.p.x)<170&&fabsf(other.p.y-anchor.p.y)<90)count++;
+                if(count>largest){largest=count;spot=anchor.p;}
+            }
+            if(largest>=6&&!activeDriller&&drillerCooldown==0){
+                if(Vector2Distance(spot,crowdSpot)>200)crowdTime=0;
+                crowdSpot=spot;crowdTime+=dt;
+                if(crowdTime>2.5f){
+                    Zombie driller{spot};driller.kind=6;driller.health=180;driller.speed=105;driller.drillTime=3;driller.drillY=spot.y;driller.grounded=true;
+                    zombies.push_back(driller);crowdTime=0;drillerCooldown=12;drillerNotice=4;
+                }
+            }else crowdTime=0;
+        }
         for(int c=tunnels.firstSector;c<=tunnels.lastSector;c++)for(int l=tunnels.firstLevel;l<=tunnels.lastLevel;l++){
             std::uint64_t id=(std::uint64_t(c)<<32)|std::uint32_t(l);
-            if((c+l)%3==1&&generatedLadders.insert(id).second){
+            if(tunnels.fixedLadder(c,l)&&generatedLadders.insert(id).second){
                 float edge=tunnels.gap(c,l);
                 tunnels.ladders.push_back({edge+19,GROUND+l*LEVEL,GROUND+(l+1)*LEVEL,edge-24,false});
             }
         }
         if(health>0){
-            switchTimer-=dt;switchNotice=std::max(0.0f,switchNotice-dt);
-            if(switchTimer<=0){
+            if(!knifeEquipped)switchTimer-=dt;switchNotice=std::max(0.0f,switchNotice-dt);
+            if(!knifeEquipped&&switchTimer<=0){
                 weapon=randomWeapon(weapon);
                 ammo=weapons[weapon].capacity;reload=0;reloadDuration=weapons[weapon].reload;
                 s.fireCooldown=.45f;flash=0;switchTimer=rf(7,11);switchNotice=2;
@@ -203,7 +232,7 @@ int main(){
                 spawnTimer=std::max(.45f,1.25f-kills*.02f);
             }
             if(reload>0){reload=std::max(0.0f,reload-dt);if(reload==0)ammo=weapons[weapon].capacity;}
-            else if((IsKeyPressed(KEY_R)&&ammo<weapons[weapon].capacity)||ammo==0)reload=reloadDuration;
+            else if(!knifeEquipped&&((IsKeyPressed(KEY_R)&&ammo<weapons[weapon].capacity)||ammo==0))reload=reloadDuration;
         }
         for(auto &z:zombies){
             z.vy+=1120*dt;Vector2 zv={z.health<=0?z.vx:0,z.vy};float impact=z.vy;
@@ -212,6 +241,18 @@ int main(){
             if(z.bleed>0){z.bleed-=dt;if(GetRandomValue(0,2)==0)blood({z.p.x,z.p.y-((z.missing&1)?65.0f:43.0f)},{rf(-35,35),-100},2);}
             if(z.health<=0){z.fall+=dt;z.vx*=1-dt*(z.grounded?4:.5f);continue;}
             z.frozen=std::max(0.0f,z.frozen-dt);z.stumble-=dt;
+            if(z.kind==6&&z.drillTime>0&&health>0){
+                z.climbing=-1;z.vy=0;
+                if(z.grounded&&z.frozen==0){
+                    z.drillTime=std::max(0.0f,z.drillTime-dt);shake=std::max(shake,2.0f);
+                    for(int i=0;i<3;i++)spawn({z.p.x+rf(-12,12),z.p.y-2},{rf(-110,110),rf(-150,-30)},rf(.2f,.6f),rf(2,5),{154,132,87,255},4);
+                    if(z.drillTime==0){
+                        tunnels.drill(z.p.x,z.drillY);tunnels.generate(s.p);shake=12;
+                        for(int i=0;i<30;i++)spawn({z.p.x+rf(-70,70),z.p.y},{rf(-120,120),rf(-170,40)},.7f,rf(3,8),{143,125,87,255},4);
+                    }
+                }
+                continue;
+            }
             float distance=s.p.x-z.p.x;
             z.phase+=dt*(z.kind==0?4:z.kind==1?16:11)*(z.frozen>0?.2f:1); z.attack=std::max(0.0f,z.attack-dt);z.dodge=std::max(0.0f,z.dodge-dt);
             if(health>0){
@@ -226,6 +267,10 @@ int main(){
                     for(int i=0;i<(int)tunnels.ladders.size();i++){auto l=tunnels.ladders[i];if(fabsf(z.p.y-l.bottom)<50&&fabsf(z.p.x-l.x)<nearest){nearest=fabsf(z.p.x-l.x);z.climbing=i;}}
                 }
                 float targetX=z.climbing>=0?tunnels.ladders[z.climbing].x:s.p.x;
+                if(z.climbing<0&&s.p.y>z.p.y+130){
+                    float best=100000;
+                    for(auto h:tunnels.holes)if(fabsf(h.y-z.p.y)<80&&fabsf(h.x-z.p.x)<best){best=fabsf(h.x-z.p.x);targetX=h.x;}
+                }
                 if(z.climbing>=0&&fabsf(z.p.x-targetX)<22){
                     auto l=tunnels.ladders[z.climbing];z.p.x=l.x;z.p.y-=110*dt;z.vy=0;
                     if(z.p.y<=l.top){z.p={l.exitX,l.top};z.climbing=-1;}
@@ -239,7 +284,7 @@ int main(){
                 Vector2 aimDir=Vector2Normalize(Vector2Subtract(cursor,{s.p.x,s.p.y-52}));
                 Vector2 toZombie={z.p.x-s.p.x,z.p.y-50-(s.p.y-52)};
                 bool threatened=IsMouseButtonDown(MOUSE_BUTTON_LEFT)&&Vector2DotProduct(toZombie,aimDir)>0&&fabsf(toZombie.x*aimDir.y-toZombie.y*aimDir.x)<85;
-                if(!crippled&&z.climbing<0&&z.frozen==0&&z.kind!=3&&z.grounded&&z.dodge==0&&((threatened&&fabsf(distance)<750)||fabsf(distance)<190||z.kind==2)){
+                if(!crippled&&z.climbing<0&&z.frozen==0&&z.kind!=3&&z.grounded&&s.p.y<z.p.y+130&&z.dodge==0&&((threatened&&fabsf(distance)<750)||fabsf(distance)<190||z.kind==2)){
                     z.vy=z.kind==2?-rf(480,620):-rf(330,470);z.dodge=z.kind==2?rf(.75f,1.2f):rf(1.4f,2.8f);
                 }
                 if(fabsf(distance)<39&&fabsf(s.p.y-z.p.y)<62&&z.attack==0){health=std::max(0.0f,health-(z.kind==3?20:10));z.attack=.85f;hurt=1;shake=7;}
@@ -270,9 +315,8 @@ int main(){
             move=0;s.vel={0,0};s.grounded=false;s.p.y-=145*dt;s.walk+=dt*8;
             if(s.p.y<=personalLadder.top){s.p={personalLadder.exitX,personalLadder.top};climbing=false;s.grounded=true;}
         }else{
-            s.vel.y+=1120*dt;float impact=s.vel.y;
+            s.vel.y+=1120*dt;
             s.grounded=tunnels.move(s.p,s.vel,dt);
-            if(s.grounded&&impact>700){health=std::max(0.0f,health-(impact-650)*.09f);hurt=1;shake=10;}
         }
         if(fabsf(move)>0.01f&&s.grounded)s.walk+=dt*(IsKeyDown(KEY_LEFT_SHIFT)?13.5f:9.0f);
         s.recoil=std::max(0.0f,s.recoil-dt*8.0f);
@@ -292,7 +336,22 @@ int main(){
         float aim=atan2f(mouse.y-shoulder.y,mouse.x-shoulder.x);
         s.facing=(cosf(aim)>=0)?1:-1;
         Vector2 muzzle=vadd({s.p.x+5,s.p.y-52},vmul(dir(aim),weapons[weapon].length+7-s.recoil*8));
-        if(IsMouseButtonDown(MOUSE_BUTTON_LEFT)&&s.fireCooldown<=0&&reload==0&&ammo>0&&health>0&&!climbing)shoot(muzzle,aim);
+        if(!knifeEquipped&&IsMouseButtonDown(MOUSE_BUTTON_LEFT)&&s.fireCooldown<=0&&reload==0&&ammo>0&&health>0&&!climbing)shoot(muzzle,aim);
+        if(knifeEquipped&&IsMouseButtonPressed(MOUSE_BUTTON_LEFT)&&knifeCooldown==0&&health>0&&!climbing){
+            knifeSwing=.25f;knifeCooldown=.45f;
+            Vector2 origin={s.p.x+5,s.p.y-52};
+            for(auto &z:zombies)if(z.health>0){
+                Vector2 target={z.p.x,z.p.y-45};
+                if(!inKnifeZone(origin,target,aim))continue;
+                bool blocked=false;
+                for(int i=1;i<=16;i++)if(tunnels.solidPoint(Vector2Lerp(origin,target,i/16.0f))){blocked=true;break;}
+                if(blocked)continue;
+                Vector2 force=vmul(dir(aim),220);
+                z.health=0;die(z,force);
+                for(int part=0;part<5;part++)detach(z,part,force);
+                blood(target,force,65);shake=8;
+            }
+        }
         for(auto &p:projectiles){
             p.life-=dt;Vector2 previous=p.p;
             p.v.y+=(p.type==GRENADE||p.type==CONFETTI?580:p.type==BOW||p.type==CROSSBOW?160:0)*dt;
@@ -466,6 +525,19 @@ int main(){
             if(z.kind==3){rect(head.x-14,head.y-17,28,9,{225,184,53,255});DrawEllipse((int)head.x,(int)head.y-10,18,4,{198,152,34,255});}
             if(z.kind==4){rect(head.x-13,head.y-19,26,7,{36,37,40,255});rect(head.x-18,head.y-13,36,3,{36,37,40,255});}
             if(z.kind==5&&!z.ladderUsed)drawLadder({x+cameraX-facing*24,z.p.y-105,z.p.y-7,0,false},cameraX);
+            if(z.kind==6){
+                rect(head.x-14,head.y-17,28,8,{235,181,54,255});DrawCircleV({head.x+facing*11,head.y-13},4,{255,239,167,255});
+                Vector2 tool={x+facing*10,z.p.y-25};
+                if(z.drillTime>0){tool.x+=sinf(time*70)*3;tool.y=z.p.y-22;}
+                line({chestZ.x,chestZ.y+10},tool,8,{113,119,83,255});
+                rect(tool.x-9,tool.y-11,18,22,{229,169,47,255});
+                line({tool.x,tool.y+11},{tool.x+(z.drillTime>0?sinf(time*90)*2:0),tool.y+24},5,{178,182,164,255});
+                line({tool.x-14,tool.y-8},{tool.x+14,tool.y-8},4,{40,43,39,255});
+                if(z.drillTime>0){
+                    rect(x-30,z.p.y-132,60,5,{29,30,26,255});rect(x-30,z.p.y-132,60*(1-z.drillTime/3),5,{235,181,54,255});
+                    DrawText("DRRRRR!",(int)x-32,(int)z.p.y-150,13,{242,211,121,255});
+                }
+            }
             DrawText(zombieNames[z.kind],(int)x-38,(int)z.p.y-112,10,{204,194,167,190});
         }
         for(const auto &j:jokes){
@@ -503,14 +575,16 @@ int main(){
         rect(chest.x+s.facing*3-5,chest.y-31,13,6,{22,29,28,255});
         // Weapon follows cursor; drawn as thick lines and rectangular hardware.
         Vector2 hand={chest.x+s.facing*7,chest.y+3};
+        bool bowSelected=!knifeEquipped&&(weapon==BOW||weapon==CROSSBOW);
+        if(bowSelected)hand={s.p.x-cameraX+5,s.p.y-52};
         float reloadProgress=reload>0?1-reload/reloadDuration:0;
-        float reloadTilt=reload>0?sinf(reloadProgress*PI)*.85f*s.facing:0;
+        float reloadTilt=reload>0&&!bowSelected?sinf(reloadProgress*PI)*.85f*s.facing:0;
         Vector2 d=dir(aim+reloadTilt);
         Vector2 gunStart=vadd(hand,vmul(d,-9+s.recoil*7));
         Vector2 gunEnd=vadd(hand,vmul(d,weapons[weapon].length-s.recoil*8));
         Vector2 perp={-d.y,d.x};
         Vector2 support=vadd(hand,vmul(d,22));
-        if(reload>0){
+        if(reload>0&&!bowSelected){
             float reach=sinf(clampf(reloadProgress/.65f,0,1)*PI);
             support=Vector2Lerp(vadd(hand,vmul(d,17)),{hip.x+s.facing*10,hip.y-1},reach);
         }
@@ -524,7 +598,22 @@ int main(){
                 line({chest.x+side*17,chest.y-4},rung,7,{96,91,70,255});DrawCircleV(rung,4,{133,115,87,255});
             }
         }
-        if(weapon==BOW||weapon==CROSSBOW){
+        if(knifeEquipped){
+            float progress=knifeSwing>0?1-knifeSwing/.25f:.5f;
+            float bladeAngle=aim+(knifeSwing>0?(progress*2-1)*KNIFE_HALF_ARC:0);
+            Vector2 bladeDir=dir(bladeAngle),bladeNormal={-bladeDir.y,bladeDir.x};
+            Vector2 grip=vadd(hand,vmul(bladeDir,22)),tip=vadd(hand,vmul(bladeDir,61));
+            line(hand,grip,7,{51,49,40,255});
+            line(vadd(grip,vmul(bladeNormal,-8)),vadd(grip,vmul(bladeNormal,8)),4,{101,107,102,255});
+            DrawTriangle(vadd(grip,vmul(bladeNormal,-4)),tip,vadd(grip,vmul(bladeNormal,4)),{211,221,215,255});
+            line(grip,tip,2,{239,242,224,255});
+            if(knifeSwing>0){
+                for(int i=0;i<18;i++){
+                    float a=aim-KNIFE_HALF_ARC+i*(2*KNIFE_HALF_ARC/18);
+                    line(vadd(hand,vmul(dir(a),KNIFE_RANGE)),vadd(hand,vmul(dir(a+2*KNIFE_HALF_ARC/18),KNIFE_RANGE)),3,{230,234,206,(unsigned char)(150*knifeSwing/.25f)});
+                }
+            }
+        }else if(weapon==BOW||weapon==CROSSBOW){
             Vector2 upper=vadd(hand,vadd(vmul(perp,-37),vmul(d,17)));
             Vector2 lower=vadd(hand,vadd(vmul(perp,37),vmul(d,17)));
             Vector2 grip=vadd(hand,vmul(d,30));
@@ -556,7 +645,7 @@ int main(){
         if(weapon==CONFETTI){line(hand,gunEnd,17,{166,64,178,255});for(int i=0;i<4;i++)DrawCircleV(vadd(hand,vmul(d,i*12)),4,ColorFromHSV(i*80,.8f,1));}
         }
         Vector2 actualMuzzle=vadd({s.p.x-cameraX+5,s.p.y-52},vmul(d,weapons[weapon].length+7-s.recoil*8));
-        if(flash>0){
+        if(flash>0&&!knifeEquipped){
             float len=38*flash;
             DrawTriangle(vadd(actualMuzzle,vmul(perp,-9*flash)),
                          vadd(actualMuzzle,vmul(d,len)),
@@ -608,10 +697,11 @@ int main(){
         DrawText("CINEMATIC PROTOTYPE  /  SECTOR 07",38,67,13,{172,171,149,255});
         DrawText(TextFormat("ROUNDS FIRED  %04d",rounds),SW-235,38,17,{224,206,158,255});
         DrawText(TextFormat("HEALTH %03d   KILLS %03d   AMMO %02d / %02d",(int)health,kills,ammo,weapons[weapon].capacity),36,99,18,{224,206,158,255});
-        DrawText(TextFormat("%s   /   AUTO SWITCH IN %.0fs",weapons[weapon].name,ceilf(switchTimer)),36,126,16,{204,194,153,255});
+        DrawText(knifeEquipped?"KNIFE / LMB SLASH / F RETURN TO GUN":TextFormat("%s   /   AUTO SWITCH IN %.0fs",weapons[weapon].name,ceilf(switchTimer)),36,126,16,{204,194,153,255});
         DrawText(TextFormat("DEPTH %.0fm   E: PLACE / CLIMB / RETRIEVE LADDER",std::max(0.0f,(s.p.y-GROUND)/18)),36,151,14,{204,194,153,255});
         if(climbing)DrawText("CLIMBING / LADDER RETURNS TO YOUR POCKET",SW/2-230,SH-120,17,{238,208,140,255});
         if(ladderNotice>0)DrawText("MOVE CLOSER TO A WALL OR SHAFT EDGE",SW/2-215,SH-120,17,{238,208,140,255});
+        if(drillerNotice>0)DrawText("DRILLER ABOVE / FLOOR BREACH INCOMING",SW/2-220,190,19,{245,179,67,255});
         if(switchNotice>0)DrawText("WEAPON CHANGED",SW/2-110,145,20,{242,207,119,255});
         if(reload>0){
             const char* reloadLabel=weapon==BOW||weapon==CROSSBOW?"NOCKING ARROW":weapon==RPG?"LOADING ROCKET":weapon==CONFETTI?"REFILLING PARTY SUPPLIES":weapon==GRENADE?"LOADING GRENADES":reloadProgress<.68f?"RELOADING / MAGAZINE":"RELOADING / CHAMBER";
@@ -620,7 +710,7 @@ int main(){
         }
         if(hurt>0)rect(0,0,SW,SH,{130,15,10,(unsigned char)(hurt*65)});
         if(health<=0){rect(0,0,SW,SH,{8,10,11,180});DrawText("YOU WERE OVERRUN",SW/2-210,290,36,{224,206,180,255});DrawText("ENTER TO RESTART",SW/2-120,345,22,{200,191,167,255});}
-        DrawText("A/D MOVE  SHIFT SPRINT  SPACE JUMP  E LADDER  MOUSE AIM  LMB FIRE  R RELOAD",36,SH-43,15,{213,207,181,225});
+        DrawText("A/D MOVE  SHIFT SPRINT  SPACE JUMP  E LADDER  F KNIFE  LMB ATTACK  R RELOAD",36,SH-43,15,{213,207,181,225});
         EndTextureMode();
 
         BeginDrawing();
