@@ -1,0 +1,19 @@
+Start testing: Nov 06 16:38 Central Standard Time
+----------------------------------------------------------
+1/1 Testing: TunnelPhysics
+1/1 Test: TunnelPhysics
+Command: "C:/Users/gfg285/Downloads/cinematic_soldier/cinematic_soldier/build/TunnelChecks.exe"
+Directory: C:/Users/gfg285/Downloads/cinematic_soldier/cinematic_soldier/build
+"TunnelPhysics" start time: Nov 06 16:38 Central Standard Time
+Output:
+----------------------------------------------------------
+Tunnel checks: PASSED
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"TunnelPhysics" end time: Nov 06 16:38 Central Standard Time
+"TunnelPhysics" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Nov 06 16:38 Central Standard Time
